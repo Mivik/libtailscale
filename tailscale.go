@@ -37,6 +37,8 @@ var servers struct {
 
 type server struct {
 	s       *tsnet.Server
+	ctx     context.Context
+	cancel  context.CancelFunc
 	lastErr string
 }
 
@@ -100,7 +102,12 @@ func TsnetNewServer() C.int {
 	}
 	sd := servers.next
 	servers.next++
-	s := &server{s: &tsnet.Server{}}
+	ctx, cancel := context.WithCancel(context.Background())
+	s := &server{
+		s:      &tsnet.Server{},
+		ctx:    ctx,
+		cancel: cancel,
+	}
 	servers.m[sd] = s
 	return (C.int)(sd)
 }
@@ -118,9 +125,9 @@ func TsnetStart(sd C.int) C.int {
 func TsnetUp(sd C.int) C.int {
 	s, err := getServer(sd)
 	if err != nil {
-		return s.recErr(err)
+		return C.EBADF
 	}
-	_, err = s.s.Up(context.Background()) // cancellation is via TsnetClose
+	_, err = s.s.Up(s.ctx) // cancellation is via TsnetClose
 	return s.recErr(err)
 }
 
@@ -137,8 +144,25 @@ func TsnetClose(sd C.int) C.int {
 		return C.EBADF
 	}
 
-	// TODO: cancel Up
-	// TODO: close related listeners / conns.
+	s.cancel()
+
+	listeners.mu.Lock()
+	for _, l := range listeners.m {
+		if l.s == s {
+			l.ln.Close()
+		}
+	}
+	listeners.mu.Unlock()
+
+	conns.mu.Lock()
+	for _, c := range conns.m {
+		if c.s == s.s {
+			c.c.Close()
+			c.r.Close()
+		}
+	}
+	conns.mu.Unlock()
+
 	if err := s.s.Close(); err != nil {
 		s.s.Logf("tailscale_close: failed with %v", err)
 		return -1
@@ -207,7 +231,11 @@ func TsnetErrmsg(sd C.int, buf *C.char, buflen C.size_t) C.int {
 func TsnetListen(sd C.int, network, addr *C.char, listenerOut *C.int) C.int {
 	s, err := getServer(sd)
 	if err != nil {
-		return s.recErr(err)
+		return C.EBADF
+	}
+
+	if s.ctx.Err() != nil {
+		return s.recErr(s.ctx.Err())
 	}
 
 	ln, err := s.s.Listen(C.GoString(network), C.GoString(addr))
@@ -235,6 +263,7 @@ func TsnetListen(sd C.int, network, addr *C.char, listenerOut *C.int) C.int {
 	listeners.m[fdC] = listener
 	listeners.mu.Unlock()
 
+	lctx, lcancel := context.WithCancel(s.ctx)
 	cleanup := func() {
 		// If fdC is closed on the C side, then we end up calling
 		// into cleanup twice. Be careful to avoid syscall.Close
@@ -246,8 +275,13 @@ func TsnetListen(sd C.int, network, addr *C.char, listenerOut *C.int) C.int {
 		}
 		listeners.mu.Unlock()
 
+		lcancel()
 		ln.Close()
 	}
+	go func() {
+		<-lctx.Done()
+		cleanup()
+	}()
 	go func() {
 		// fdC is never written to, so trying to read from sp blocks
 		// until fdC is closed. We use this as a signal that C is
@@ -259,14 +293,17 @@ func TsnetListen(sd C.int, network, addr *C.char, listenerOut *C.int) C.int {
 		cleanup()
 	}()
 	go func() {
-		defer cleanup()
 		for {
 			netConn, err := ln.Accept()
 			if err != nil {
 				return
 			}
+			if s.ctx.Err() != nil {
+				netConn.Close()
+				return
+			}
 			var connFd C.int
-			if err := newConn(s, netConn, &connFd); err != nil {
+			if err := newConn(s.ctx, s, netConn, &connFd); err != nil {
 				if s.s.Logf != nil {
 					s.s.Logf("libtailscale.accept: newConn: %v", err)
 				}
@@ -297,7 +334,7 @@ func TsnetListen(sd C.int, network, addr *C.char, listenerOut *C.int) C.int {
 	return 0
 }
 
-func newConn(s *server, netConn net.Conn, connOut *C.int) error {
+func newConn(ctx context.Context, s *server, netConn net.Conn, connOut *C.int) error {
 	fds, err := syscall.Socketpair(syscall.AF_LOCAL, syscall.SOCK_STREAM, 0)
 	if err != nil {
 		return err
@@ -313,6 +350,7 @@ func newConn(s *server, netConn net.Conn, connOut *C.int) error {
 	conns.m[fdC] = c
 	conns.mu.Unlock()
 
+	connCtx, connCancel := context.WithCancel(ctx)
 	connCleanup := func() {
 		var inCleanup bool
 		conns.mu.Lock()
@@ -326,9 +364,14 @@ func newConn(s *server, netConn net.Conn, connOut *C.int) error {
 			return
 		}
 
+		connCancel()
 		r.Close()
 		netConn.Close()
 	}
+	go func() {
+		<-connCtx.Done()
+		connCleanup()
+	}()
 	go func() {
 		defer connCleanup()
 		var b [1 << 16]byte
@@ -401,11 +444,11 @@ func TsnetDial(sd C.int, network, addr *C.char, connOut *C.int) C.int {
 	if err != nil {
 		return s.recErr(err)
 	}
-	netConn, err := s.s.Dial(context.Background(), C.GoString(network), C.GoString(addr))
+	netConn, err := s.s.Dial(s.ctx, C.GoString(network), C.GoString(addr))
 	if err != nil {
 		return s.recErr(err)
 	}
-	if newConn(s, netConn, connOut); err != nil {
+	if err := newConn(s.ctx, s, netConn, connOut); err != nil {
 		return s.recErr(err)
 	}
 	return 0
@@ -541,7 +584,7 @@ func TsnetEnableFunnelToLocalhostPlaintextHttp1(sd C.int, localhostPort C.int) C
 		return s.recErr(err)
 	}
 
-	ctx := context.Background()
+	ctx := s.ctx
 	lc, err := s.s.LocalClient()
 	if err != nil {
 		return s.recErr(err)

@@ -5,6 +5,7 @@
 #include <sys/socket.h>
 #include <stdio.h>
 #include <unistd.h>
+#include <errno.h>
 
 // Functions exported by Go.
 extern int TsnetNewServer();
@@ -62,8 +63,12 @@ int tailscale_accept(tailscale_listener ld, tailscale_conn* conn_out) {
 	msg.msg_control = cbuf;
 	msg.msg_controllen = sizeof(cbuf);
 
-	if (recvmsg(ld, &msg, 0) == -1) {
-		return -1;
+	int read = recvmsg(ld, &msg, 0);
+	if (read < 0) {
+		return errno;
+	}
+	if (read == 0) {
+		return ECONNRESET;
 	}
 
 	struct cmsghdr* cmsg = CMSG_FIRSTHDR(&msg);
