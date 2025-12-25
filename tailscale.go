@@ -282,7 +282,7 @@ func TsnetListen(sd C.int, network, addr *C.char, listenerOut *C.int) C.int {
 		<-lctx.Done()
 		cleanup()
 	}()
-	go func() {
+	/* go func() {
 		// fdC is never written to, so trying to read from sp blocks
 		// until fdC is closed. We use this as a signal that C is
 		// done with the listener, and we can tear it down.
@@ -291,7 +291,7 @@ func TsnetListen(sd C.int, network, addr *C.char, listenerOut *C.int) C.int {
 		var buf [256]byte
 		syscall.Read(sp, buf[:])
 		cleanup()
-	}()
+	}() */
 	go func() {
 		for {
 			netConn, err := ln.Accept()
