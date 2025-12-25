@@ -191,6 +191,8 @@ extern int tailscale_loopback(tailscale sd, char* addr_out, size_t addrlen, char
 // 	-1    - other error, details printed to the tsnet logger
 extern int tailscale_enable_funnel_to_localhost_plaintext_http1(tailscale sd, int localhostPort);
 
+extern int tailscale_register_android_interface(void *env, void *app_ctx);
+
 // tailscale_errmsg writes the details of the last error to buf.
 // 
 // After returning, buf is always NUL-terminated.

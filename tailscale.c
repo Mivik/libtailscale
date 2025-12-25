@@ -24,6 +24,7 @@ extern int TsnetGetRemoteAddr(int listener, int conn, char *buf, size_t buflen);
 extern int TsnetListen(int sd, char* net, char* addr, int* listenerOut);
 extern int TsnetLoopback(int sd, char* addrOut, size_t addrLen, char* proxyOut, char* localOut);
 extern int TsnetEnableFunnelToLocalhostPlaintextHttp1(int sd, int localhostPort);
+extern int TsnetRegisterAndroidInterface(void *env, void *app_ctx);
 
 tailscale tailscale_new() {
 	return TsnetNewServer();
@@ -111,3 +112,9 @@ int tailscale_errmsg(tailscale sd, char* buf, size_t buflen) {
 int tailscale_enable_funnel_to_localhost_plaintext_http1(tailscale sd, int localhostPort) {
 	return TsnetEnableFunnelToLocalhostPlaintextHttp1(sd, localhostPort);
 }
+
+#ifdef __ANDROID__
+int tailscale_register_android_interface(void *env, void *app_ctx) {
+  return TsnetRegisterAndroidInterface(env, app_ctx);
+}
+#endif
